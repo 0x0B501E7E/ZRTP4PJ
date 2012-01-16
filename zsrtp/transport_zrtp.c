@@ -27,6 +27,12 @@
 #include <pjlib-util.h>
 #include <ZsrtpCWrapper.h>
 
+#ifdef DYNAMIC_TIMER
+#include <pj/config_site.h>
+#include <pjsua-lib/pjsua.h>
+#include <pjsua-lib/pjsua_internal.h>
+#endif
+
 #define THIS_FILE "transport_zrtp.c"
 
 /* Transport functions prototypes */
@@ -117,7 +123,7 @@ struct tp_zrtp
     int32_t refcount;
     pj_timer_entry timeoutEntry;
 #ifdef DYNAMIC_TIMER
-    pj_pool_t* timer_pool;
+//    pj_pool_t* timer_pool;
     pj_timer_heap_t* timer_heap;
 #endif
     pj_mutex_t* zrtpMutex;
@@ -368,15 +374,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_zrtp_create(pjmedia_endpt *endpt,
         }
     }
 #else
-    zrtp->timer_heap = NULL;
-    zrtp->timer_pool = pjmedia_endpt_create_pool(endpt, "zrtp_timer", 256, 256);
-    rc = pj_timer_heap_create(zrtp->timer_pool, 4, &zrtp->timer_heap);
-	if (rc != PJ_SUCCESS)
-	{
-		pj_pool_release(zrtp->timer_pool);
-		pj_pool_release(zrtp->pool);
-		return rc;
-	}
+    zrtp->timer_heap = pjsip_endpt_get_timer_heap(pjsua_var.endpt);
 #endif
 
     /* Create the empty wrapper */
