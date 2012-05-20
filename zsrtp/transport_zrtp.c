@@ -164,8 +164,8 @@ static void zrtp_synchEnter(ZrtpContext* ctx) ;
 static void zrtp_synchLeave(ZrtpContext* ctx) ;
 static void zrtp_zrtpAskEnrollment(ZrtpContext* ctx, int32_t info) ;
 static void zrtp_zrtpInformEnrollment(ZrtpContext* ctx, int32_t info) ;
-static void zrtp_signSAS(ZrtpContext* ctx, char* sas) ;
-static int32_t zrtp_checkSASSignature(ZrtpContext* ctx, char* sas) ;
+static void zrtp_signSAS(ZrtpContext* ctx, uint8_t* sasHash) ;
+static int32_t zrtp_checkSASSignature(ZrtpContext* ctx, uint8_t* sasHash) ;
 
 /* The callback function structure for ZRTP */
 static zrtp_Callbacks c_callbacks =
@@ -789,23 +789,23 @@ static void zrtp_zrtpInformEnrollment(ZrtpContext* ctx, int32_t info)
     }
 }
 
-static void zrtp_signSAS(ZrtpContext* ctx, char* sas)
+static void zrtp_signSAS(ZrtpContext* ctx, uint8_t* sasHash)
 {
     struct tp_zrtp *zrtp = (struct tp_zrtp*)ctx->userData;
 
     if (zrtp->userCallback != NULL)
     {
-        zrtp->userCallback->zrtp_signSAS(zrtp->userCallback->userData, sas);
+        zrtp->userCallback->zrtp_signSAS(zrtp->userCallback->userData, sasHash);
     }
 }
 
-static int32_t zrtp_checkSASSignature(ZrtpContext* ctx, char* sas)
+static int32_t zrtp_checkSASSignature(ZrtpContext* ctx, uint8_t* sasHash)
 {
     struct tp_zrtp *zrtp = (struct tp_zrtp*)ctx->userData;
 
     if (zrtp->userCallback != NULL)
     {
-        return zrtp->userCallback->zrtp_checkSASSignature(zrtp->userCallback->userData, sas);
+        return zrtp->userCallback->zrtp_checkSASSignature(zrtp->userCallback->userData, sasHash);
     }
     return 0;
 }
@@ -861,6 +861,7 @@ PJ_DEF(void) pjmedia_transport_zrtp_stopZrtp(pjmedia_transport *tp)
 
     pj_assert(tp && zrtp->zrtpCtx);
 
+    zrtp_stopZrtpEngine(zrtp->zrtpCtx);
     zrtp_DestroyWrapper(zrtp->zrtpCtx);
     zrtp->zrtpCtx = NULL;
     zrtp->started = 0;
@@ -1265,6 +1266,28 @@ static pj_status_t transport_encode_sdp(pjmedia_transport *tp,
     if (rem_sdp)
     {
         /* Do checking stuffs here.. */
+    }
+
+    {
+      /* Add zrtp-hash attribute to both INVITE and 200 OK. */
+      char *zrtp_hello_hash = zrtp_getHelloHash(zrtp->zrtpCtx);
+      if (zrtp_hello_hash && *zrtp_hello_hash) {
+        int zrtp_hello_hash_len = strlen(zrtp_hello_hash);
+        pj_str_t *zrtp_hash_str = PJ_POOL_ALLOC_T(sdp_pool, pj_str_t);
+        pjmedia_sdp_attr *zrtp_hash = NULL;
+
+        zrtp_hash_str->ptr = zrtp_hello_hash;
+        zrtp_hash_str->slen = zrtp_hello_hash_len;
+        zrtp_hash = pjmedia_sdp_attr_create(sdp_pool, "zrtp-hash", zrtp_hash_str);
+        if (zrtp_hash &&
+            pjmedia_sdp_attr_add(&local_sdp->media[media_index]->attr_count,
+                                 local_sdp->media[media_index]->attr,
+                                 zrtp_hash)) {
+          PJ_LOG(4, (THIS_FILE, "attribute added: a=zrtp-hash:%s", zrtp_hello_hash));
+        } else {
+          PJ_LOG(4, (THIS_FILE, "error adding attribute: a=zrtp-hash:%s", zrtp_hello_hash));
+        }
+      }
     }
 
     /* You may do anything to the local_sdp, e.g. adding new attributes, or
