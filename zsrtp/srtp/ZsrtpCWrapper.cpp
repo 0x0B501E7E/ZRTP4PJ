@@ -17,6 +17,7 @@
 
 */
 
+#include <stdint.h>
 #include <CryptoContext.h>
 #include <CryptoContextCtrl.h>
 #include <ZsrtpCWrapper.h>
