@@ -333,7 +333,7 @@ static int timer_cancel_entry(pj_timer_entry* entry)
 
 //                                         1
 //                                1234567890123456
-static pj_char_t clientId[] =    "PJS ZRTP 2.1.0  ";
+static pj_char_t clientId[] =    "PJS ZRTP 3.0.0  ";
 
 /*
  * Create the ZRTP transport.
@@ -1282,7 +1282,7 @@ static pj_status_t transport_encode_sdp(pjmedia_transport *tp,
         if (zrtp_hash &&
             pjmedia_sdp_attr_add(&local_sdp->media[media_index]->attr_count,
                                  local_sdp->media[media_index]->attr,
-                                 zrtp_hash)) {
+                                 zrtp_hash) == PJ_SUCCESS) {
           PJ_LOG(4, (THIS_FILE, "attribute added: a=zrtp-hash:%s", zrtp_hello_hash));
         } else {
           PJ_LOG(4, (THIS_FILE, "error adding attribute: a=zrtp-hash:%s", zrtp_hello_hash));
