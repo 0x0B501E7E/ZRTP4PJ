@@ -559,7 +559,7 @@ PJ_DECL(void*) pjmedia_transport_zrtp_getUserData(pjmedia_transport *tp);
  *
  * @see pjmedia_transport_zrtp_initialize
  */
-PJ_DECL(void) pjmedia_transport_zrtp_startZrtp(pjmedia_transport *tp);
+PJ_DECL(pj_status_t) pjmedia_transport_zrtp_startZrtp(pjmedia_transport *tp);
 
 /**
  * Stops the ZRTP protocol engine.

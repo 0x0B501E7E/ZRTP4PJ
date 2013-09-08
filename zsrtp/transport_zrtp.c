@@ -27,11 +27,9 @@
 #include <pjlib-util.h>
 #include <ZsrtpCWrapper.h>
 
-#ifdef DYNAMIC_TIMER
 #include <pj/config_site.h>
 #include <pjsua-lib/pjsua.h>
 #include <pjsua-lib/pjsua_internal.h>
-#endif
 
 #define THIS_FILE "transport_zrtp.c"
 
@@ -122,11 +120,8 @@ struct tp_zrtp
     int32_t  unprotect_err;
     int32_t refcount;
     pj_timer_entry timeoutEntry;
-#ifdef DYNAMIC_TIMER
-//    pj_pool_t* timer_pool;
-    pj_timer_heap_t* timer_heap;
-#endif
     pj_mutex_t* zrtpMutex;
+    pj_mutex_t* zrtpStartMutex;
     ZsrtpContext* srtpReceive;
     ZsrtpContext* srtpSend;
     ZsrtpContextCtrl* srtcpReceive;
@@ -373,8 +368,6 @@ PJ_DEF(pj_status_t) pjmedia_transport_zrtp_create(pjmedia_endpt *endpt,
             return rc;
         }
     }
-#else
-    zrtp->timer_heap = pjsip_endpt_get_timer_heap(pjsua_var.endpt);
 #endif
 
     /* Create the empty wrapper */
@@ -384,6 +377,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_zrtp_create(pjmedia_endpt *endpt,
     zrtp->clientIdString = clientId;    /* Set standard name */
     zrtp->zrtpSeq = 1;                  /* TODO: randomize */
     rc = pj_mutex_create_simple(zrtp->pool, "zrtp", &zrtp->zrtpMutex);
+    rc = pj_mutex_create_simple(zrtp->pool, "zrtp", &zrtp->zrtpStartMutex);
     zrtp->zrtpBuffer = pj_pool_zalloc(pool, MAX_ZRTP_SIZE);
     zrtp->sendBuffer = pj_pool_zalloc(pool, MAX_RTP_BUFFER_LEN);
     zrtp->sendBufferCtrl = pj_pool_zalloc(pool, MAX_RTCP_BUFFER_LEN);
@@ -471,9 +465,7 @@ static int32_t zrtp_activateTimer(ZrtpContext* ctx, int32_t time)
 #ifndef DYNAMIC_TIMER
     timer_add_entry(&zrtp->timeoutEntry, &timeout);
 #else
-    if(zrtp->timer_heap != NULL){
-    	pj_timer_heap_schedule(zrtp->timer_heap, &zrtp->timeoutEntry, &timeout);
-    }
+    pjsip_endpt_schedule_timer(pjsua_var.endpt, &zrtp->timeoutEntry, &timeout);
 #endif
 
     return 1;
@@ -486,9 +478,7 @@ static int32_t zrtp_cancelTimer(ZrtpContext* ctx)
 #ifndef DYNAMIC_TIMER
     timer_cancel_entry(&zrtp->timeoutEntry);
 #else
-    if(zrtp->timer_heap != NULL){
-    	pj_timer_heap_cancel(zrtp->timer_heap, &zrtp->timeoutEntry);
-    }
+    pjsip_endpt_cancel_timer(pjsua_var.endpt, &zrtp->timeoutEntry);
 #endif
 
     return 1;
@@ -845,14 +835,32 @@ PJ_DEF(void* )pjmedia_transport_zrtp_getUserData(pjmedia_transport *tp){
 	return zrtp->userCallback->userData;
 }
 
-PJ_DEF(void) pjmedia_transport_zrtp_startZrtp(pjmedia_transport *tp)
+PJ_DEF(pj_status_t) pjmedia_transport_zrtp_startZrtp(pjmedia_transport *tp)
 {
     struct tp_zrtp *zrtp = (struct tp_zrtp*)tp;
 
     pj_assert(tp && zrtp->zrtpCtx);
 
+    pj_status_t rc = pj_mutex_trylock(zrtp->zrtpStartMutex);
+    if(zrtp->started == 1 || rc != PJ_SUCCESS)
+    {
+        if(zrtp->started == 1)
+        {
+            rc = PJ_EIGNORED;
+        }
+        if(rc == PJ_SUCCESS)
+        {
+            pj_mutex_unlock(zrtp->zrtpStartMutex);
+        }
+        return rc;
+    }
+
     zrtp_startZrtpEngine(zrtp->zrtpCtx);
     zrtp->started = 1;
+
+    pj_mutex_unlock(zrtp->zrtpStartMutex);
+
+    return PJ_SUCCESS;
 }
 
 PJ_DEF(void) pjmedia_transport_zrtp_stopZrtp(pjmedia_transport *tp)
@@ -899,6 +907,34 @@ PJ_DECL(ZrtpContext*) pjmedia_transport_zrtp_getZrtpContext(pjmedia_transport *t
     return zrtp->zrtpCtx;
 }
 
+static pj_bool_t pjmedia_transport_zrtp_canStart(pjmedia_transport  *tp)
+{
+    pj_bool_t ice_finished = PJ_TRUE;
+
+    if(tp){
+        int j = 0;
+        pjmedia_transport_info tp_info;
+
+        pjmedia_transport_info_init(&tp_info);
+        pjmedia_transport_get_info(tp, &tp_info);
+        if (tp_info.specific_info_cnt > 0) {
+            for (j = 0; j < tp_info.specific_info_cnt; ++j) {
+                if (tp_info.spc_info[j].type==PJMEDIA_TRANSPORT_TYPE_ICE) {
+                    const pjmedia_ice_transport_info *ii;
+                    ii = (const pjmedia_ice_transport_info*)tp_info.spc_info[j].buffer;
+                    /* We have some ICE transport -- store this info to not start immediately */
+                    ice_finished = PJ_FALSE;
+                    PJ_LOG(4, (THIS_FILE, "zrtp :: has ice transport is yes... state is %d ∕ %d", ii->sess_state, ii->active));
+                    if(ii->sess_state==PJ_ICE_STRANS_STATE_RUNNING || (ii->sess_state==PJ_ICE_STRANS_STATE_INIT && !ii->active)){
+                        return PJ_TRUE;
+                    }
+                }
+            }
+        }
+    }
+    return ice_finished;
+}
+
 /*
  * get_info() is called to get the transport addresses to be put
  * in SDP c= line and a=rtcp line.
@@ -942,7 +978,7 @@ static void transport_rtp_cb(void *user_data, void *pkt, pj_ssize_t size)
     if ((*buffer & 0xf0) != 0x10)
     {
         //  Could be real RTP, check if we are in secure mode
-        if (zrtp->srtpReceive == NULL || size < 0)
+        if (zrtp->srtpReceive == NULL || size < 0 || !zrtp->started)
         {
             zrtp->stream_rtp_cb(zrtp->stream_user_data, pkt, size);
         }
@@ -971,9 +1007,11 @@ static void transport_rtp_cb(void *user_data, void *pkt, pj_ssize_t size)
                 zrtp->unprotect_err = rc;
             }
         }
-        if (!zrtp->started && zrtp->enableZrtp)
-            pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
 
+        if (!zrtp->started && zrtp->enableZrtp && pjmedia_transport_zrtp_canStart((pjmedia_transport *)zrtp))
+        {
+            pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
+        }
         return;
     }
 
@@ -1004,9 +1042,14 @@ static void transport_rtp_cb(void *user_data, void *pkt, pj_ssize_t size)
         }
         // cover the case if the other party sends _only_ ZRTP packets at the
         // beginning of a session. Start ZRTP in this case as well.
-        if (!zrtp->started)
+        if (!zrtp->started && pjmedia_transport_zrtp_canStart((pjmedia_transport *)zrtp))
         {
-            pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
+            pj_status_t status;
+            status = pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
+            if(status != PJ_SUCCESS)
+            {
+                return;
+            }
         }
         // this now points beyond the undefined and length field.
         // We need them, thus adjust
@@ -1132,13 +1175,17 @@ static pj_status_t transport_send_rtp(pjmedia_transport *tp,
 
     PJ_ASSERT_RETURN(tp && pkt, PJ_EINVAL);
 
-
-    if (!zrtp->started && zrtp->enableZrtp)
+    if (!zrtp->started && zrtp->enableZrtp && pjmedia_transport_zrtp_canStart(tp))
     {
+        pj_status_t status;
         if (zrtp->localSSRC == 0)
             zrtp->localSSRC = pj_ntohl(pui[2]);   /* Learn own SSRC before starting ZRTP */
 
-        pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
+        status = pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
+        if(status != PJ_SUCCESS)
+        {
+            return pjmedia_transport_send_rtp(zrtp->slave_tp, pkt, size);
+        }
     }
 
     if (zrtp->srtpSend == NULL)
@@ -1393,11 +1440,14 @@ static pj_status_t transport_destroy(pjmedia_transport *tp)
     pj_mutex_unlock(zrtp->zrtpMutex);
     pj_mutex_destroy(zrtp->zrtpMutex);
 
+    pj_mutex_lock(zrtp->zrtpStartMutex);
+    pj_mutex_unlock(zrtp->zrtpStartMutex);
+    pj_mutex_destroy(zrtp->zrtpStartMutex);
+    zrtp->zrtpStartMutex = NULL;
+
     pj_pool_release(zrtp->pool);
 
     return PJ_SUCCESS;
 }
-
-
 
 
