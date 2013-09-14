@@ -925,7 +925,7 @@ static pj_bool_t pjmedia_transport_zrtp_canStart(pjmedia_transport  *tp)
                     /* We have some ICE transport -- store this info to not start immediately */
                     ice_finished = PJ_FALSE;
                     PJ_LOG(4, (THIS_FILE, "zrtp :: has ice transport is yes... state is %d ∕ %d", ii->sess_state, ii->active));
-                    if(ii->sess_state==PJ_ICE_STRANS_STATE_RUNNING || (ii->sess_state==PJ_ICE_STRANS_STATE_INIT && !ii->active)){
+                    if(ii->sess_state >= PJ_ICE_STRANS_STATE_RUNNING || (ii->sess_state == PJ_ICE_STRANS_STATE_INIT && !ii->active)){
                         return PJ_TRUE;
                     }
                 }
