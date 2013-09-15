@@ -369,6 +369,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_zrtp_create(pjmedia_endpt *endpt,
         }
     }
 #endif
+    zrtp->timeoutEntry.id = -1;
 
     /* Create the empty wrapper */
     zrtp->zrtpCtx = zrtp_CreateWrapper();
@@ -475,11 +476,14 @@ static int32_t zrtp_cancelTimer(ZrtpContext* ctx)
 {
     struct tp_zrtp *zrtp = (struct tp_zrtp*)ctx->userData;
 
+    if(zrtp->timeoutEntry.id != -1){
 #ifndef DYNAMIC_TIMER
     timer_cancel_entry(&zrtp->timeoutEntry);
 #else
     pjsip_endpt_cancel_timer(pjsua_var.endpt, &zrtp->timeoutEntry);
 #endif
+    }
+    zrtp->timeoutEntry.id = -1;
 
     return 1;
 }
@@ -835,32 +839,24 @@ PJ_DEF(void* )pjmedia_transport_zrtp_getUserData(pjmedia_transport *tp){
 	return zrtp->userCallback->userData;
 }
 
-PJ_DEF(pj_status_t) pjmedia_transport_zrtp_startZrtp(pjmedia_transport *tp)
+PJ_DEF(void) pjmedia_transport_zrtp_startZrtp(pjmedia_transport *tp)
 {
     struct tp_zrtp *zrtp = (struct tp_zrtp*)tp;
 
     pj_assert(tp && zrtp->zrtpCtx);
+    pj_mutex_lock(zrtp->zrtpStartMutex);
 
-    pj_status_t rc = pj_mutex_trylock(zrtp->zrtpStartMutex);
-    if(zrtp->started == 1 || rc != PJ_SUCCESS)
+    if(zrtp->started == 1)
     {
-        if(zrtp->started == 1)
-        {
-            rc = PJ_EIGNORED;
-        }
-        if(rc == PJ_SUCCESS)
-        {
-            pj_mutex_unlock(zrtp->zrtpStartMutex);
-        }
-        return rc;
+        pj_mutex_unlock(zrtp->zrtpStartMutex);
+        return;
     }
 
     zrtp_startZrtpEngine(zrtp->zrtpCtx);
     zrtp->started = 1;
 
     pj_mutex_unlock(zrtp->zrtpStartMutex);
-
-    return PJ_SUCCESS;
+    return;
 }
 
 PJ_DEF(void) pjmedia_transport_zrtp_stopZrtp(pjmedia_transport *tp)
@@ -924,7 +920,7 @@ static pj_bool_t pjmedia_transport_zrtp_canStart(pjmedia_transport  *tp)
                     ii = (const pjmedia_ice_transport_info*)tp_info.spc_info[j].buffer;
                     /* We have some ICE transport -- store this info to not start immediately */
                     ice_finished = PJ_FALSE;
-                    PJ_LOG(4, (THIS_FILE, "zrtp :: has ice transport is yes... state is %d ∕ %d", ii->sess_state, ii->active));
+                    //PJ_LOG(4, (THIS_FILE, "zrtp :: has ice transport is yes... state is %d ∕ %d", ii->sess_state, ii->active));
                     if(ii->sess_state >= PJ_ICE_STRANS_STATE_RUNNING || (ii->sess_state == PJ_ICE_STRANS_STATE_INIT && !ii->active)){
                         return PJ_TRUE;
                     }
@@ -971,14 +967,19 @@ static void transport_rtp_cb(void *user_data, void *pkt, pj_ssize_t size)
     pj_uint8_t* buffer = (pj_uint8_t*)pkt;
     int32_t newLen = 0;
     pj_status_t rc = PJ_SUCCESS;
+    pj_bool_t cannotReceiveSrtp = PJ_FALSE;
 
     pj_assert(zrtp && zrtp->stream_rtcp_cb && pkt);
+
+    pj_mutex_lock(zrtp->zrtpStartMutex);
+    cannotReceiveSrtp = (zrtp->srtpReceive == NULL || size < 0);
+    pj_mutex_unlock(zrtp->zrtpStartMutex);
 
     // check if this could be a real RTP/SRTP packet.
     if ((*buffer & 0xf0) != 0x10)
     {
         //  Could be real RTP, check if we are in secure mode
-        if (zrtp->srtpReceive == NULL || size < 0 || !zrtp->started)
+        if (cannotReceiveSrtp)
         {
             zrtp->stream_rtp_cb(zrtp->stream_user_data, pkt, size);
         }
@@ -1040,25 +1041,23 @@ static void transport_rtp_cb(void *user_data, void *pkt, pj_ssize_t size)
         {
             return;
         }
-        // cover the case if the other party sends _only_ ZRTP packets at the
-        // beginning of a session. Start ZRTP in this case as well.
-        if (!zrtp->started && pjmedia_transport_zrtp_canStart((pjmedia_transport *)zrtp))
+        if(pjmedia_transport_zrtp_canStart((pjmedia_transport *)zrtp))
         {
-            pj_status_t status;
-            status = pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
-            if(status != PJ_SUCCESS)
+            // cover the case if the other party sends _only_ ZRTP packets at the
+            // beginning of a session. Start ZRTP in this case as well.
+            if (!zrtp->started)
             {
-                return;
+                pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
             }
-        }
-        // this now points beyond the undefined and length field.
-        // We need them, thus adjust
-        unsigned char* zrtpMsg = (buffer + 12);
+            // this now points beyond the undefined and length field.
+            // We need them, thus adjust
+            unsigned char* zrtpMsg = (buffer + 12);
 
-        // store peer's SSRC in host order, used when creating the CryptoContext
-        zrtp->peerSSRC = *(pj_uint32_t*)(buffer + 8);
-        zrtp->peerSSRC = pj_ntohl(zrtp->peerSSRC);
-        zrtp_processZrtpMessage(zrtp->zrtpCtx, zrtpMsg, zrtp->peerSSRC, size);
+            // store peer's SSRC in host order, used when creating the CryptoContext
+            zrtp->peerSSRC = *(pj_uint32_t*)(buffer + 8);
+            zrtp->peerSSRC = pj_ntohl(zrtp->peerSSRC);
+            zrtp_processZrtpMessage(zrtp->zrtpCtx, zrtpMsg, zrtp->peerSSRC, size);
+        }
     }
 }
 
@@ -1071,10 +1070,15 @@ static void transport_rtcp_cb(void *user_data, void *pkt, pj_ssize_t size)
     struct tp_zrtp *zrtp = (struct tp_zrtp*)user_data;
     int32_t newLen = 0;
     pj_status_t rc = PJ_SUCCESS;
+    pj_bool_t cannotReceiveSrtcp = PJ_FALSE;
     
     pj_assert(zrtp && zrtp->stream_rtcp_cb);
-    
-    if (zrtp->srtcpReceive == NULL || size < 0)
+
+    pj_mutex_lock(zrtp->zrtpStartMutex);
+    cannotReceiveSrtcp = (zrtp->srtcpReceive == NULL || size < 0);
+    pj_mutex_unlock(zrtp->zrtpStartMutex);
+
+    if (cannotReceiveSrtcp)
     {
         zrtp->stream_rtcp_cb(zrtp->stream_user_data, pkt, size);
     }
@@ -1175,17 +1179,16 @@ static pj_status_t transport_send_rtp(pjmedia_transport *tp,
 
     PJ_ASSERT_RETURN(tp && pkt, PJ_EINVAL);
 
+    pj_mutex_lock(zrtp->zrtpStartMutex);
+    pj_mutex_unlock(zrtp->zrtpStartMutex);
+
     if (!zrtp->started && zrtp->enableZrtp && pjmedia_transport_zrtp_canStart(tp))
     {
-        pj_status_t status;
         if (zrtp->localSSRC == 0)
             zrtp->localSSRC = pj_ntohl(pui[2]);   /* Learn own SSRC before starting ZRTP */
 
-        status = pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
-        if(status != PJ_SUCCESS)
-        {
-            return pjmedia_transport_send_rtp(zrtp->slave_tp, pkt, size);
-        }
+        // Never start here to avoid dead lock
+        //pjmedia_transport_zrtp_startZrtp((pjmedia_transport *)zrtp);
     }
 
     if (zrtp->srtpSend == NULL)
@@ -1221,6 +1224,9 @@ static pj_status_t transport_send_rtcp(pjmedia_transport *tp,
     pj_status_t rc = PJ_SUCCESS;
     int32_t newLen = 0;
     PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+
+    pj_mutex_lock(zrtp->zrtpStartMutex);
+    pj_mutex_unlock(zrtp->zrtpStartMutex);
 
     /* You may do some processing to the RTCP packet here if you want. */
     if (zrtp->srtcpSend == NULL)
