@@ -1,0 +1,3 @@
+[submodule "zsrtp/zrtp"]
+	path = zsrtp/zrtp
+	url = git@github.com:0x0B501E7E/ZRTPCPP.git
